@@ -16,6 +16,7 @@ package org.flowable.engine.test.bpmn.multiinstance;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -679,6 +680,79 @@ public class MultiInstanceTest extends PluggableFlowableTestCase {
             assertThat(varInstance).isNotNull();
             assertThat(varInstance.getValue()).isEqualTo(0);
         }
+    }
+
+    @Test
+    @Deployment
+    public void testParallelAsyncServiceTasks() {
+        int count = 2500;
+        ProcessInstance processInstance = runtimeService.createProcessInstanceBuilder()
+                .processDefinitionKey("miParallelAsyncScriptTask")
+                .variable("nrOfLoops", count)
+                .start();
+        List<Job> jobs = managementService.createJobQuery().list();
+        assertThat(jobs).hasSize(count);
+
+//        if (HistoryTestHelper.isHistoryLevelAtLeast(HistoryLevel.ACTIVITY, processEngineConfiguration)) {
+//            HistoricVariableInstance varInstance = historyService.createHistoricVariableInstanceQuery()
+//                    .processInstanceId(processInstance.getId())
+//                    .variableName("nrOfCompletedInstances")
+//                    .singleResult();
+//            assertThat(varInstance).isNotNull();
+//            assertThat(varInstance.getValue()).isEqualTo(0);
+//
+//            varInstance = historyService.createHistoricVariableInstanceQuery()
+//                    .processInstanceId(processInstance.getId())
+//                    .variableName("nrOfActiveInstances")
+//                    .singleResult();
+//            assertThat(varInstance).isNotNull();
+//            assertThat(varInstance.getValue()).isEqualTo(count);
+//        }
+
+        // When a job fails it is moved to the timer jobs, so it can be executed later
+        waitForJobExecutorToProcessAllJobsAndExecutableTimerJobs(Duration.ofMinutes(5).toMillis(), 200);
+        jobs = managementService.createJobQuery().list();
+        assertThat(jobs).isEmpty();
+        List<Job> timerJobs = managementService.createTimerJobQuery().list();
+        assertThat(timerJobs).isEmpty();
+
+        List<Job> deadLetterJobs = managementService.createDeadLetterJobQuery().list();
+        assertThat(deadLetterJobs).isEmpty();
+
+        List<Execution> executions = runtimeService.createExecutionQuery().list();
+        assertThat(executions).hasSize(2);
+        Execution processInstanceExecution = null;
+        Execution waitStateExecution = null;
+        for (Execution execution : executions) {
+            if (execution.getId().equals(execution.getProcessInstanceId())) {
+                processInstanceExecution = execution;
+            } else {
+                waitStateExecution = execution;
+            }
+        }
+        assertThat(processInstanceExecution).isNotNull();
+        assertThat(waitStateExecution).isNotNull();
+
+        Map<String, VariableInstance> variableInstances = runtimeService.getVariableInstances(processInstanceExecution.getProcessInstanceId());
+        assertThat(variableInstances).containsOnlyKeys("nrOfLoops");
+        VariableInstance nrOfLoops = variableInstances.get("nrOfLoops");
+        assertThat(nrOfLoops.getValue()).isEqualTo(count);
+
+//        if (HistoryTestHelper.isHistoryLevelAtLeast(HistoryLevel.ACTIVITY, processEngineConfiguration)) {
+//            HistoricVariableInstance varInstance = historyService.createHistoricVariableInstanceQuery()
+//                    .processInstanceId(processInstanceExecution.getProcessInstanceId())
+//                    .variableName("nrOfCompletedInstances")
+//                    .singleResult();
+//            assertThat(varInstance).isNotNull();
+//            assertThat(varInstance.getValue()).isEqualTo(count);
+//
+//            varInstance = historyService.createHistoricVariableInstanceQuery()
+//                    .processInstanceId(processInstanceExecution.getProcessInstanceId())
+//                    .variableName("nrOfActiveInstances")
+//                    .singleResult();
+//            assertThat(varInstance).isNotNull();
+//            assertThat(varInstance.getValue()).isEqualTo(0);
+//        }
     }
 
     @Test
