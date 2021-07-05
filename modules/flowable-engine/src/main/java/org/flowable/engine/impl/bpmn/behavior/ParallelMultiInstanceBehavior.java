@@ -108,7 +108,7 @@ public class ParallelMultiInstanceBehavior extends MultiInstanceActivityBehavior
         ProcessEngineConfigurationImpl processEngineConfiguration = CommandContextUtil.getProcessEngineConfiguration();
         // No need to check the completed variable for backwards compatibility(like below),
         // as this is for new instances and not for existing ones that get completed and might be started in the 'old way'
-        if (isAsyncWithoutWaitStates(processEngineConfiguration)) {
+        if (isAsyncWithoutWaitStates(processEngineConfiguration) && processEngineConfiguration.isParallelMultiInstanceAsyncLeave()) {
 
             // The execution doesn't matter, so taking the first one as this one has highest chance most likely of finishing first typically
             JobEntity job = JobUtil.createJob(concurrentExecutions.get(0), ParallelMultiInstanceWithNoWaitStateCompletionJobHandler.TYPE, processEngineConfiguration);
