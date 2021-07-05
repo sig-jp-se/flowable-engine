@@ -31,6 +31,7 @@ import org.flowable.engine.impl.bpmn.helper.ScopeUtil;
 import org.flowable.engine.impl.cfg.ProcessEngineConfigurationImpl;
 import org.flowable.engine.impl.delegate.ActivityBehavior;
 import org.flowable.engine.impl.jobexecutor.ParallelMultiInstanceActivityCompletionJobHandler;
+import org.flowable.engine.impl.jobexecutor.ParallelMultiInstanceWithNoWaitStateCompletionJobHandler;
 import org.flowable.engine.impl.persistence.entity.ExecutionEntity;
 import org.flowable.engine.impl.persistence.entity.ExecutionEntityManager;
 import org.flowable.engine.impl.util.CommandContextUtil;
@@ -104,7 +105,25 @@ public class ParallelMultiInstanceBehavior extends MultiInstanceActivityBehavior
             multiInstanceRootExecution.setActive(false);
         }
 
+        ProcessEngineConfigurationImpl processEngineConfiguration = CommandContextUtil.getProcessEngineConfiguration();
+        // No need to check the completed variable for backwards compatibility(like below),
+        // as this is for new instances and not for existing ones that get completed and might be started in the 'old way'
+        if (isAsyncWithoutWaitStates(processEngineConfiguration)) {
+
+            // The execution doesn't matter, so taking the first one as this one has highest chance most likely of finishing first typically
+            JobEntity job = JobUtil.createJob(concurrentExecutions.get(0), ParallelMultiInstanceWithNoWaitStateCompletionJobHandler.TYPE, processEngineConfiguration);
+            JobService jobService = processEngineConfiguration.getJobServiceConfiguration().getJobService();
+            jobService.createAsyncJobNoTriggerAsyncExecutor(job, true);
+            jobService.insertJob(job);
+        }
+
         return nrOfInstances;
+    }
+
+    protected boolean isAsyncWithoutWaitStates(ProcessEngineConfigurationImpl processEngineConfiguration) {
+        return activity.isAsynchronous()
+            && activity.getLoopCharacteristics().isNoWaitStates()
+            && processEngineConfiguration.isParallelMultiInstanceAsyncLeave();
     }
 
     /**
@@ -120,15 +139,44 @@ public class ParallelMultiInstanceBehavior extends MultiInstanceActivityBehavior
             super.leave(execution); // Plan the default leave
         }
 
+        ProcessEngineConfigurationImpl processEngineConfiguration = CommandContextUtil.getProcessEngineConfiguration();
+        if (isAsyncWithoutWaitStates(processEngineConfiguration)) {
+
+            // Optimization: if there are active child executions in the database, the childExecutions definitely must not be fetched.
+            // If there are none in the database, the child executions need to be fetched: either the multi instance is completed
+            // or this logic is called at a time when things have not yet been flushed.
+            ExecutionEntityManager executionEntityManager = processEngineConfiguration.getExecutionEntityManager();
+            DelegateExecution miRootExecution = getMultiInstanceRootExecution(execution);
+            long activeChildExecutionsCount = executionEntityManager.countActiveExecutionsByParentId(miRootExecution.getId());
+
+            if (activeChildExecutionsCount > 0) { // there are active ones, nothing to do
+
+                inactivateExecution(execution, processEngineConfiguration);
+                callActivityEndListeners(execution);
+                aggregateVariablesForChildExecution(execution, miRootExecution);
+
+            } else {
+                internalLeave(execution, zeroNrOfInstances);
+
+            }
+
+        } else {
+            internalLeave(execution, zeroNrOfInstances);
+
+        }
+
+    }
+
+    protected void internalLeave(DelegateExecution execution, boolean zeroNrOfInstances) {
         int loopCounter = getLoopVariable(execution, getCollectionElementIndexVariable());
         int nrOfInstances = getLoopVariable(execution, NUMBER_OF_INSTANCES);
         VariableInstance nrOfCompletedInstancesVariable = getLoopVariableInstance(execution, NUMBER_OF_COMPLETED_INSTANCES);
         boolean usesParallelMultiInstanceLoopVariable =
-                nrOfCompletedInstancesVariable != null && ParallelMultiInstanceLoopVariableType.TYPE_NAME.equals(nrOfCompletedInstancesVariable.getTypeName());
+            nrOfCompletedInstancesVariable != null && ParallelMultiInstanceLoopVariableType.TYPE_NAME.equals(nrOfCompletedInstancesVariable.getTypeName());
 
         int nrOfCompletedInstances = getLoopVariable(execution, NUMBER_OF_COMPLETED_INSTANCES) + 1;
         int nrOfActiveInstances = getLoopVariable(execution, NUMBER_OF_ACTIVE_INSTANCES) - 1;
-        
+
         DelegateExecution miRootExecution = getMultiInstanceRootExecution(execution);
         if (miRootExecution != null && !usesParallelMultiInstanceLoopVariable) { // will be null in case of empty collection
             // only need to update the variables if it doesn't use the new mechanism, i.e. backwards compatibility for already running instances
@@ -137,11 +185,7 @@ public class ParallelMultiInstanceBehavior extends MultiInstanceActivityBehavior
         }
 
         ProcessEngineConfigurationImpl processEngineConfiguration = CommandContextUtil.getProcessEngineConfiguration();
-        processEngineConfiguration.getActivityInstanceEntityManager().recordActivityEnd((ExecutionEntity) execution, null);
-        ExecutionEntity executionEntity = (ExecutionEntity) execution;
-        if (execution.getParent() != null) {
-            executionEntity.inactivate();
-        }
+        inactivateExecution(execution, processEngineConfiguration);
 
         callActivityEndListeners(execution);
 
@@ -151,11 +195,15 @@ public class ParallelMultiInstanceBehavior extends MultiInstanceActivityBehavior
             return;
         }
 
+        ExecutionEntity executionEntity = (ExecutionEntity) execution;
         if (executionEntity.getParent() != null) {
 
             // If usesParallelMultiInstanceLoopVariable is true, it means that this instance is running
             // with the old logic and we can't async leave.
-            boolean asyncLeave = usesParallelMultiInstanceLoopVariable && processEngineConfiguration.isParallelMultiInstanceAsyncLeave();
+            boolean asyncLeave = usesParallelMultiInstanceLoopVariable
+                && processEngineConfiguration.isParallelMultiInstanceAsyncLeave()
+                && !isAsyncWithoutWaitStates(processEngineConfiguration); // when using the 'no wait states' flag, arriving should execute the regular logic.
+
             if (!asyncLeave) {
                 // If we are not leaving async then we have to lock the parent scope
                 lockFirstParentScope(executionEntity);
@@ -167,10 +215,9 @@ public class ParallelMultiInstanceBehavior extends MultiInstanceActivityBehavior
 
             boolean isCompletionConditionSatisfied = completionConditionSatisfied(execution.getParent());
             if (nrOfCompletedInstances >= nrOfInstances || isCompletionConditionSatisfied) {
-
                 leave(executionEntity, nrOfInstances, nrOfCompletedInstances, isCompletionConditionSatisfied);
-            } else if (asyncLeave) {
 
+            } else if (asyncLeave) {
                 JobService jobService = processEngineConfiguration.getJobServiceConfiguration().getJobService();
                 JobEntity job = JobUtil.createJob(executionEntity, ParallelMultiInstanceActivityCompletionJobHandler.TYPE, processEngineConfiguration);
 
@@ -185,15 +232,24 @@ public class ParallelMultiInstanceBehavior extends MultiInstanceActivityBehavior
         }
     }
 
-    public void leaveAsync(ExecutionEntity execution) {
+    protected ExecutionEntity inactivateExecution(DelegateExecution execution, ProcessEngineConfigurationImpl processEngineConfiguration) {
+        processEngineConfiguration.getActivityInstanceEntityManager().recordActivityEnd((ExecutionEntity) execution, null);
+        ExecutionEntity executionEntity = (ExecutionEntity) execution;
+        if (execution.getParent() != null) {
+            executionEntity.inactivate();
+        }
+        return executionEntity;
+    }
+
+    public boolean leaveAsync(ExecutionEntity execution) {
         int nrOfInstances = getLoopVariable(execution, NUMBER_OF_INSTANCES);
         int nrOfCompletedInstances = getLoopVariable(execution, NUMBER_OF_COMPLETED_INSTANCES);
         boolean isCompletionConditionSatisfied = completionConditionSatisfied(execution.getParent());
-
         if (nrOfCompletedInstances >= nrOfInstances || isCompletionConditionSatisfied) {
-
             leave(execution, nrOfInstances, nrOfCompletedInstances, isCompletionConditionSatisfied);
+            return true;
         }
+        return false;
     }
 
     protected void leave(ExecutionEntity execution, int nrOfInstances, int nrOfCompletedInstances, boolean isCompletionConditionSatisfied) {

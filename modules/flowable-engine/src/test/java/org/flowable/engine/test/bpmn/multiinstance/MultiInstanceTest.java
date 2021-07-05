@@ -691,7 +691,7 @@ public class MultiInstanceTest extends PluggableFlowableTestCase {
                 .variable("nrOfLoops", count)
                 .start();
         List<Job> jobs = managementService.createJobQuery().list();
-        assertThat(jobs).hasSize(count);
+        assertThat(jobs).hasSize(count + 1); // 1 for each async service task + 1 for the job that does the leave
 
 //        if (HistoryTestHelper.isHistoryLevelAtLeast(HistoryLevel.ACTIVITY, processEngineConfiguration)) {
 //            HistoricVariableInstance varInstance = historyService.createHistoricVariableInstanceQuery()
@@ -709,8 +709,7 @@ public class MultiInstanceTest extends PluggableFlowableTestCase {
 //            assertThat(varInstance.getValue()).isEqualTo(count);
 //        }
 
-        // When a job fails it is moved to the timer jobs, so it can be executed later
-        waitForJobExecutorToProcessAllJobsAndExecutableTimerJobs(Duration.ofMinutes(5).toMillis(), 200);
+        waitForJobExecutorToProcessAllJobsAndAllTimerJobs(Duration.ofMinutes(5).toMillis(), 200);
         jobs = managementService.createJobQuery().list();
         assertThat(jobs).isEmpty();
         List<Job> timerJobs = managementService.createTimerJobQuery().list();
