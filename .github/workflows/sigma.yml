@@ -1,0 +1,21 @@
+on: [push]
+  
+jobs:
+  sigma_code_scanning_run_steps:
+    runs-on: ubuntu-latest
+    container:
+      image: hanayama0317/sigma:2021.6.0
+      credentials:
+        username: ${{ secrets.DOCKERHUB_SIGSYNOPSYS_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_SIGSYNOPSYS_PASSWORD }}
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v2
+  
+      - name: Sigma analysis
+        run: sigma analyze --format github .
+      
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v1
+        with:
+          sarif_file: sigma-results.json
